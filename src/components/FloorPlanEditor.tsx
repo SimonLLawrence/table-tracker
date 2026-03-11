@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import type { Table, TableShape } from '../types'
-import { computeSectionDividers } from '../utils'
+import { computeSectionDividers, computeViewBox } from '../utils'
 import { TableSettingsPanel } from './TableSettingsPanel'
 
 interface Props {
@@ -15,10 +15,8 @@ interface Transform {
   y: number
 }
 
-// SVG coordinate space has 15 units of padding on each side beyond the 0-100 table area
-const VIEW_PAD = 15
-const VIEW_SIZE = 100 + VIEW_PAD * 2   // 130
-const VIEWBOX = `-${VIEW_PAD} -${VIEW_PAD} ${VIEW_SIZE} ${VIEW_SIZE}`
+// Extra padding used when converting client → SVG coords; must match computeViewBox's VIEW_PAD
+const COORD_PAD = 10
 
 const MIN_SCALE = 0.4
 const MAX_SCALE = 5
@@ -94,14 +92,17 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     x: t.x, y: t.y,
   })
 
-  // Convert client → SVG coords (accounts for zoom/pan via getBoundingClientRect on the SVG)
+  // Convert client → SVG coords (getBoundingClientRect on the SVG accounts for zoom/pan)
   const toSVG = useCallback((clientX: number, clientY: number) => {
-    const rect = svgRef.current?.getBoundingClientRect()
-    if (!rect || rect.width === 0) return null
-    // SVG viewBox spans VIEW_SIZE units; map client pos into that space then offset by VIEW_PAD
+    const svgEl = svgRef.current
+    if (!svgEl) return null
+    const rect = svgEl.getBoundingClientRect()
+    if (!rect.width) return null
+    // Parse the current viewBox to get origin and size
+    const vb = svgEl.viewBox.baseVal
     return {
-      x: (clientX - rect.left) * VIEW_SIZE / rect.width - VIEW_PAD,
-      y: (clientY - rect.top) * VIEW_SIZE / rect.height - VIEW_PAD,
+      x: vb.x + (clientX - rect.left) * vb.width / rect.width,
+      y: vb.y + (clientY - rect.top) * vb.height / rect.height,
     }
   }, [])
 
@@ -164,14 +165,18 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
 
         const svgRect = svgRef.current?.getBoundingClientRect()
         if (!svgRect || svgRect.width === 0) return
-        const dxSvg = dx * VIEW_SIZE / svgRect.width
-        const dySvg = dy * VIEW_SIZE / svgRect.height
+        // Use the SVG's current viewBox size for accurate coordinate mapping
+        const vb = svgRef.current?.viewBox.baseVal
+        const vbW = vb?.width ?? 120
+        const vbH = vb?.height ?? 120
+        const dxSvg = dx * vbW / svgRect.width
+        const dySvg = dy * vbH / svgRect.height
 
-        // Allow tables to be placed anywhere in the padded area
-        const minX = -VIEW_PAD + 1
-        const minY = -VIEW_PAD + 1
-        const maxX = 100 + VIEW_PAD - ptr.tableW - 1
-        const maxY = 100 + VIEW_PAD - ptr.tableH - 1
+        // Allow tables to be placed in a generous area beyond the original 0-100 space
+        const minX = -COORD_PAD * 3
+        const minY = -COORD_PAD * 3
+        const maxX = 100 + COORD_PAD * 3 - ptr.tableW
+        const maxY = 100 + COORD_PAD * 3 - ptr.tableH
 
         const newX = Math.max(minX, Math.min(maxX, ptr.startTableX + dxSvg))
         const newY = Math.max(minY, Math.min(maxY, ptr.startTableY + dySvg))
@@ -292,11 +297,11 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
   const handleAddTable = () => {
     // Find the SVG coordinate at the centre of the visible container
     const el = containerRef.current
-    let cx = 50, cy = 50
+    let cx = 41, cy = 41
     if (el) {
       const rect = el.getBoundingClientRect()
       const centre = toSVG(rect.left + rect.width / 2, rect.top + rect.height / 2)
-      if (centre) { cx = centre.x - 9; cy = centre.y - 6 } // offset by half table size
+      if (centre) { cx = centre.x - 9; cy = centre.y - 6 } // offset by half table size (18x12)
     }
 
     const newTable: Table = {
@@ -343,6 +348,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
   // ── Derived ───────────────────────────────────────────────────────────────
   const overlapping = findOverlaps(localTables)
   const sectionDividers = computeSectionDividers(localTables)
+  const viewBox = computeViewBox(localTables)
   const allSections = [...new Set(localTables.map(t => t.section).filter(Boolean))] as string[]
   const sectionCounts: Record<string, number> = {}
   for (const t of localTables) if (t.section) sectionCounts[t.section] = (sectionCounts[t.section] ?? 0) + 1
@@ -402,25 +408,23 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
           <div className="absolute inset-0 p-2">
             <svg
               ref={svgRef}
-              viewBox={VIEWBOX}
+              viewBox={viewBox}
               className="w-full h-full"
               style={{ touchAction: 'none' }}
             >
-              {/* Grid — covers the full padded area */}
+              {/* Grid — rendered behind everything using a large rect */}
               <defs>
                 <pattern id="editGrid" width="10" height="10" patternUnits="userSpaceOnUse">
                   <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#e5e7eb" strokeWidth="0.3" />
                 </pattern>
               </defs>
-              <rect x={-VIEW_PAD} y={-VIEW_PAD} width={VIEW_SIZE} height={VIEW_SIZE} fill="url(#editGrid)" />
-
-              {/* Boundary of the 0-100 table area — subtle guide */}
-              <rect x="0" y="0" width="100" height="100" fill="none" stroke="#d1d5db" strokeWidth="0.4" strokeDasharray="2,2" rx="1" />
+              {/* Large grid background — always covers the visible area */}
+              <rect x="-500" y="-500" width="1000" height="1000" fill="url(#editGrid)" />
 
               {/* Section dividers */}
               {sectionDividers.map(d => (
                 <g key={d.label}>
-                  <line x1={-VIEW_PAD + 2} y1={d.y} x2={100 + VIEW_PAD - 2} y2={d.y}
+                  <line x1="0" y1={d.y} x2="100" y2={d.y}
                     stroke="#d1d5db" strokeWidth="0.3" strokeDasharray="1,1" />
                   <text x="50" y={d.y + 3.5}
                     textAnchor="middle" fontSize="2.5" fill="#9ca3af" fontWeight="600" fontFamily="system-ui">

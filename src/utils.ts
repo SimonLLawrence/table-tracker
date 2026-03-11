@@ -1,5 +1,16 @@
 import type { Table } from './types'
 
+const VIEW_PAD = 10
+
+export function computeViewBox(tables: Table[]): string {
+  if (!tables.length) return `${-VIEW_PAD} ${-VIEW_PAD} ${100 + VIEW_PAD * 2} ${100 + VIEW_PAD * 2}`
+  const minX = Math.min(...tables.map(t => t.position.x))
+  const minY = Math.min(...tables.map(t => t.position.y))
+  const maxX = Math.max(...tables.map(t => t.position.x + t.size.w))
+  const maxY = Math.max(...tables.map(t => t.position.y + t.size.h))
+  return `${minX - VIEW_PAD} ${minY - VIEW_PAD} ${maxX - minX + VIEW_PAD * 2} ${maxY - minY + VIEW_PAD * 2}`
+}
+
 export function computeSectionDividers(tables: Table[]): { y: number; label: string }[] {
   const sectionBounds = new Map<string, { minY: number; maxY: number }>()
   for (const t of tables) {
