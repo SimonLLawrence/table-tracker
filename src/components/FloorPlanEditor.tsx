@@ -15,7 +15,17 @@ interface Transform {
   y: number
 }
 
+// SVG coordinate space has 15 units of padding on each side beyond the 0-100 table area
+const VIEW_PAD = 15
+const VIEW_SIZE = 100 + VIEW_PAD * 2   // 130
+const VIEWBOX = `-${VIEW_PAD} -${VIEW_PAD} ${VIEW_SIZE} ${VIEW_SIZE}`
+
+const MIN_SCALE = 0.4
+const MAX_SCALE = 5
+const INITIAL: Transform = { scale: 1, x: 0, y: 0 }
+
 interface DragState {
+  kind: 'table'
   tableId: string
   startClientX: number
   startClientY: number
@@ -23,23 +33,21 @@ interface DragState {
   startTableY: number
   tableW: number
   tableH: number
-  hasMoved: boolean
+  moved: boolean
 }
 
 interface PanState {
+  kind: 'pan'
   startClientX: number
   startClientY: number
   startTx: number
   startTy: number
-  hasMoved: boolean
 }
 
-const MIN_SCALE = 0.5
-const MAX_SCALE = 4
-const INITIAL: Transform = { scale: 1, x: 0, y: 0 }
+type PointerState = DragState | PanState | null
 
 function findOverlaps(tables: Table[]): Set<string> {
-  const overlapping = new Set<string>()
+  const out = new Set<string>()
   for (let i = 0; i < tables.length; i++) {
     for (let j = i + 1; j < tables.length; j++) {
       const a = tables[i], b = tables[j]
@@ -48,96 +56,76 @@ function findOverlaps(tables: Table[]): Set<string> {
         a.position.x + a.size.w > b.position.x &&
         a.position.y < b.position.y + b.size.h &&
         a.position.y + a.size.h > b.position.y
-      ) {
-        overlapping.add(a.id)
-        overlapping.add(b.id)
-      }
+      ) { out.add(a.id); out.add(b.id) }
     }
   }
-  return overlapping
+  return out
 }
 
-function getNextTableNumber(tables: Table[]): string {
-  const nums = tables.map(t => {
-    const m = t.number.match(/\d+$/)
-    return m ? parseInt(m[0]) : 0
-  })
-  const max = nums.length > 0 ? Math.max(...nums) : 0
-  return `T${max + 1}`
+function nextTableNumber(tables: Table[]): string {
+  const nums = tables.map(t => { const m = t.number.match(/\d+$/); return m ? parseInt(m[0]) : 0 })
+  return `T${(nums.length ? Math.max(...nums) : 0) + 1}`
 }
 
-function getMostCommonSection(tables: Table[]): string {
-  const counts = new Map<string, number>()
-  for (const t of tables) {
-    if (t.section) counts.set(t.section, (counts.get(t.section) ?? 0) + 1)
-  }
-  if (counts.size === 0) return 'Main'
-  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]
+function commonSection(tables: Table[]): string {
+  const c = new Map<string, number>()
+  for (const t of tables) if (t.section) c.set(t.section, (c.get(t.section) ?? 0) + 1)
+  return c.size === 0 ? 'Main' : [...c.entries()].sort((a, b) => b[1] - a[1])[0][0]
 }
 
 export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props) {
   const [localTables, setLocalTables] = useState<Table[]>(initialTables)
-  const [selectedTableId, setSelectedTableId] = useState<string | null>(null)
-  const [isDragging, setIsDragging] = useState(false)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [transform, setTransform] = useState<Transform>(INITIAL)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
-  const dragRef = useRef<DragState | null>(null)
-  const panRef = useRef<PanState | null>(null)
+  const pointerRef = useRef<PointerState>(null)
   const lastPinchDist = useRef<number | null>(null)
-  const localTablesRef = useRef(localTables)
+  const tablesRef = useRef(localTables)
+  const selectedIdRef = useRef<string | null>(null)
+  const setSelectedIdRef = useRef(setSelectedId)
 
-  // Keep ref in sync with state (used by global event handlers)
-  useEffect(() => { localTablesRef.current = localTables }, [localTables])
+  useEffect(() => { tablesRef.current = localTables }, [localTables])
+  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
 
-  const clampTransform = useCallback((t: Transform): Transform => ({
+  const clamp = (t: Transform): Transform => ({
     scale: Math.min(MAX_SCALE, Math.max(MIN_SCALE, t.scale)),
-    x: t.x,
-    y: t.y,
-  }), [])
+    x: t.x, y: t.y,
+  })
 
-  // Convert client position to SVG coordinate (0–100)
-  const toSVGCoords = useCallback((clientX: number, clientY: number) => {
+  // Convert client → SVG coords (accounts for zoom/pan via getBoundingClientRect on the SVG)
+  const toSVG = useCallback((clientX: number, clientY: number) => {
     const rect = svgRef.current?.getBoundingClientRect()
     if (!rect || rect.width === 0) return null
+    // SVG viewBox spans VIEW_SIZE units; map client pos into that space then offset by VIEW_PAD
     return {
-      x: (clientX - rect.left) * 100 / rect.width,
-      y: (clientY - rect.top) * 100 / rect.height,
+      x: (clientX - rect.left) * VIEW_SIZE / rect.width - VIEW_PAD,
+      y: (clientY - rect.top) * VIEW_SIZE / rect.height - VIEW_PAD,
     }
   }, [])
 
-  // Find the topmost table at an SVG coordinate
   const getTableAt = useCallback((svgX: number, svgY: number): Table | undefined => {
-    const tables = localTablesRef.current
-    // Reverse so last-rendered (top) is found first
-    for (let i = tables.length - 1; i >= 0; i--) {
-      const t = tables[i]
-      if (
-        svgX >= t.position.x && svgX <= t.position.x + t.size.w &&
-        svgY >= t.position.y && svgY <= t.position.y + t.size.h
-      ) return t
+    const ts = tablesRef.current
+    for (let i = ts.length - 1; i >= 0; i--) {
+      const t = ts[i]
+      if (svgX >= t.position.x && svgX <= t.position.x + t.size.w &&
+          svgY >= t.position.y && svgY <= t.position.y + t.size.h) return t
     }
-    return undefined
   }, [])
 
   // ── Mouse wheel zoom ──────────────────────────────────────────────────────
   const onWheel = useCallback((e: WheelEvent) => {
     e.preventDefault()
-    const container = containerRef.current
-    if (!container) return
-    const rect = container.getBoundingClientRect()
+    const el = containerRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
     const mx = e.clientX - rect.left
     const my = e.clientY - rect.top
-    const delta = -e.deltaY * 0.001
     setTransform(prev => {
-      const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * (1 + delta)))
+      const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * (1 - e.deltaY * 0.001)))
       const ratio = newScale / prev.scale
-      return {
-        scale: newScale,
-        x: mx - ratio * (mx - prev.x),
-        y: my - ratio * (my - prev.y),
-      }
+      return clamp({ scale: newScale, x: mx - ratio * (mx - prev.x), y: my - ratio * (my - prev.y) })
     })
   }, [])
 
@@ -148,58 +136,73 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     return () => el.removeEventListener('wheel', onWheel)
   }, [onWheel])
 
-  // ── Global drag handlers (active while isDragging) ────────────────────────
+  // ── Always-on global move/up handlers (fixes fast-tap bug) ───────────────
   useEffect(() => {
-    if (!isDragging) return
-
-    const handleMove = (e: MouseEvent | TouchEvent) => {
-      const drag = dragRef.current
-      if (!drag) return
-
-      let clientX: number, clientY: number
+    const getClient = (e: MouseEvent | TouchEvent) => {
       if ('touches' in e) {
-        if (e.touches.length === 0) return
-        clientX = e.touches[0].clientX
-        clientY = e.touches[0].clientY
-      } else {
-        clientX = (e as MouseEvent).clientX
-        clientY = (e as MouseEvent).clientY
+        return e.touches.length > 0
+          ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
+          : ('changedTouches' in e && e.changedTouches.length > 0)
+            ? { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY }
+            : null
       }
-
-      const dx = clientX - drag.startClientX
-      const dy = clientY - drag.startClientY
-      if (!drag.hasMoved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return
-
-      drag.hasMoved = true
-      e.preventDefault()
-
-      const svgRect = svgRef.current?.getBoundingClientRect()
-      if (!svgRect || svgRect.width === 0) return
-
-      const dxSvg = dx * 100 / svgRect.width
-      const dySvg = dy * 100 / svgRect.height
-
-      const newX = Math.max(0, Math.min(100 - drag.tableW, drag.startTableX + dxSvg))
-      const newY = Math.max(0, Math.min(100 - drag.tableH, drag.startTableY + dySvg))
-
-      setLocalTables(prev => prev.map(t =>
-        t.id === drag.tableId ? { ...t, position: { x: newX, y: newY } } : t
-      ))
+      return { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }
     }
 
-    const handleUp = () => {
-      const drag = dragRef.current
-      if (!drag) { setIsDragging(false); return }
+    const handleMove = (e: MouseEvent | TouchEvent) => {
+      const ptr = pointerRef.current
+      if (!ptr) return
+      const client = getClient(e)
+      if (!client) return
 
-      if (!drag.hasMoved) {
-        // Tap: open settings panel
-        setSelectedTableId(drag.tableId)
-      } else {
-        // Drag complete: commit to parent
-        onTablesChange(localTablesRef.current)
+      if (ptr.kind === 'table') {
+        const dx = client.x - ptr.startClientX
+        const dy = client.y - ptr.startClientY
+        if (!ptr.moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return
+        ptr.moved = true
+        e.preventDefault()
+
+        const svgRect = svgRef.current?.getBoundingClientRect()
+        if (!svgRect || svgRect.width === 0) return
+        const dxSvg = dx * VIEW_SIZE / svgRect.width
+        const dySvg = dy * VIEW_SIZE / svgRect.height
+
+        // Allow tables to be placed anywhere in the padded area
+        const minX = -VIEW_PAD + 1
+        const minY = -VIEW_PAD + 1
+        const maxX = 100 + VIEW_PAD - ptr.tableW - 1
+        const maxY = 100 + VIEW_PAD - ptr.tableH - 1
+
+        const newX = Math.max(minX, Math.min(maxX, ptr.startTableX + dxSvg))
+        const newY = Math.max(minY, Math.min(maxY, ptr.startTableY + dySvg))
+
+        tablesRef.current = tablesRef.current.map(t =>
+          t.id === ptr.tableId ? { ...t, position: { x: newX, y: newY } } : t
+        )
+        setLocalTables([...tablesRef.current])
+
+      } else if (ptr.kind === 'pan') {
+        const dx = client.x - ptr.startClientX
+        const dy = client.y - ptr.startClientY
+        setTransform(prev => ({ ...prev, x: ptr.startTx + dx, y: ptr.startTy + dy }))
       }
-      dragRef.current = null
-      setIsDragging(false)
+    }
+
+    const handleUp = (_e: MouseEvent | TouchEvent) => {
+      const ptr = pointerRef.current
+      if (!ptr) return
+
+      if (ptr.kind === 'table') {
+        if (!ptr.moved) {
+          // Pure tap — open settings
+          setSelectedIdRef.current(ptr.tableId)
+        } else {
+          // Drag ended — commit
+          onTablesChange(tablesRef.current)
+        }
+      }
+
+      pointerRef.current = null
     }
 
     window.addEventListener('mousemove', handleMove)
@@ -213,16 +216,17 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
       window.removeEventListener('mouseup', handleUp)
       window.removeEventListener('touchend', handleUp)
     }
-  }, [isDragging, onTablesChange])
+  }, [onTablesChange])
 
-  // ── Pointer down: start table drag or pan ─────────────────────────────────
-  const handlePointerDown = useCallback((clientX: number, clientY: number): boolean => {
-    const svgPos = toSVGCoords(clientX, clientY)
-    if (!svgPos) return false
+  // ── Pointer down (mouse + touch) ──────────────────────────────────────────
+  const handlePointerDown = useCallback((clientX: number, clientY: number, currentTransform: Transform) => {
+    const svgPos = toSVG(clientX, clientY)
+    if (!svgPos) return
 
     const table = getTableAt(svgPos.x, svgPos.y)
     if (table) {
-      dragRef.current = {
+      pointerRef.current = {
+        kind: 'table',
         tableId: table.id,
         startClientX: clientX,
         startClientY: clientY,
@@ -230,177 +234,127 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         startTableY: table.position.y,
         tableW: table.size.w,
         tableH: table.size.h,
-        hasMoved: false,
+        moved: false,
       }
-      setIsDragging(true)
-      return true // table drag started
+    } else {
+      // Tap on empty canvas — deselect and start pan
+      setSelectedId(null)
+      pointerRef.current = {
+        kind: 'pan',
+        startClientX: clientX,
+        startClientY: clientY,
+        startTx: currentTransform.x,
+        startTy: currentTransform.y,
+      }
     }
+  }, [toSVG, getTableAt])
 
-    // Tap on empty space: deselect
-    setSelectedTableId(null)
-    return false // start pan
-  }, [toSVGCoords, getTableAt])
-
-  // ── Mouse events on container ─────────────────────────────────────────────
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return
-    const startedTableDrag = handlePointerDown(e.clientX, e.clientY)
-    if (!startedTableDrag) {
-      panRef.current = {
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startTx: transform.x,
-        startTy: transform.y,
-        hasMoved: false,
-      }
-    }
+    handlePointerDown(e.clientX, e.clientY, transform)
   }
 
-  const onMouseMove = (e: React.MouseEvent) => {
-    if (isDragging) return
-    if (!panRef.current) return
-    const dx = e.clientX - panRef.current.startClientX
-    const dy = e.clientY - panRef.current.startClientY
-    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) panRef.current.hasMoved = true
-    setTransform(prev => ({
-      ...prev,
-      x: panRef.current!.startTx + dx,
-      y: panRef.current!.startTy + dy,
-    }))
-  }
-
-  const onMouseUp = () => {
-    panRef.current = null
-  }
-
-  // ── Touch events on container ─────────────────────────────────────────────
+  // ── Touch events ──────────────────────────────────────────────────────────
   const onTouchStart = (e: React.TouchEvent) => {
-    if (isDragging) return
     if (e.touches.length === 2) {
+      pointerRef.current = null
       const [a, b] = [e.touches[0], e.touches[1]]
       lastPinchDist.current = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY)
-      panRef.current = null
     } else if (e.touches.length === 1) {
-      const touch = e.touches[0]
-      const startedTableDrag = handlePointerDown(touch.clientX, touch.clientY)
-      if (!startedTableDrag) {
-        panRef.current = {
-          startClientX: touch.clientX,
-          startClientY: touch.clientY,
-          startTx: transform.x,
-          startTy: transform.y,
-          hasMoved: false,
-        }
-      }
+      handlePointerDown(e.touches[0].clientX, e.touches[0].clientY, transform)
     }
   }
 
   const onTouchMove = (e: React.TouchEvent) => {
-    if (isDragging) return
     if (e.touches.length === 2) {
       const [a, b] = [e.touches[0], e.touches[1]]
       const dist = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY)
       const mid = { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 }
-      const container = containerRef.current
-      if (!container || !lastPinchDist.current) return
-      const rect = container.getBoundingClientRect()
-      const pinchX = mid.x - rect.left
-      const pinchY = mid.y - rect.top
-      const scaleFactor = dist / lastPinchDist.current
+      const el = containerRef.current
+      if (!el || !lastPinchDist.current) return
+      const rect = el.getBoundingClientRect()
+      const px = mid.x - rect.left, py = mid.y - rect.top
+      const factor = dist / lastPinchDist.current
       setTransform(prev => {
-        const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * scaleFactor))
-        const ratio = newScale / prev.scale
-        return clampTransform({
-          scale: newScale,
-          x: pinchX - ratio * (pinchX - prev.x),
-          y: pinchY - ratio * (pinchY - prev.y),
-        })
+        const s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * factor))
+        const r = s / prev.scale
+        return clamp({ scale: s, x: px - r * (px - prev.x), y: py - r * (py - prev.y) })
       })
       lastPinchDist.current = dist
-    } else if (e.touches.length === 1 && panRef.current) {
-      const touch = e.touches[0]
-      const dx = touch.clientX - panRef.current.startClientX
-      const dy = touch.clientY - panRef.current.startClientY
-      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) panRef.current.hasMoved = true
-      setTransform(prev => ({
-        ...prev,
-        x: panRef.current!.startTx + dx,
-        y: panRef.current!.startTy + dy,
-      }))
     }
   }
 
-  const onTouchEnd = (e: React.TouchEvent) => {
-    if (e.touches.length < 2) lastPinchDist.current = null
-    if (e.touches.length === 0) panRef.current = null
+  const onTouchEnd = (_e: React.TouchEvent) => {
+    lastPinchDist.current = null
   }
 
-  // ── Add table ─────────────────────────────────────────────────────────────
+  // ── Add table — placed at current viewport centre ─────────────────────────
   const handleAddTable = () => {
-    const nextNum = getNextTableNumber(localTables)
-    const mostCommonSection = getMostCommonSection(localTables)
+    // Find the SVG coordinate at the centre of the visible container
+    const el = containerRef.current
+    let cx = 50, cy = 50
+    if (el) {
+      const rect = el.getBoundingClientRect()
+      const centre = toSVG(rect.left + rect.width / 2, rect.top + rect.height / 2)
+      if (centre) { cx = centre.x - 9; cy = centre.y - 6 } // offset by half table size
+    }
+
     const newTable: Table = {
       id: uuidv4(),
-      number: nextNum,
+      number: nextTableNumber(localTables),
       capacity: 4,
       shape: 'square' as TableShape,
-      position: { x: 41, y: 41 },
+      position: { x: cx, y: cy },
       size: { w: 18, h: 12 },
-      section: mostCommonSection,
+      section: commonSection(localTables),
       status: 'free',
     }
     const updated = [...localTables, newTable]
+    tablesRef.current = updated
     setLocalTables(updated)
     onTablesChange(updated)
-    setSelectedTableId(newTable.id)
+    setSelectedId(newTable.id)
   }
 
-  // ── Settings save ─────────────────────────────────────────────────────────
+  // ── Settings handlers ─────────────────────────────────────────────────────
   const handleSettingsSave = (
     tableId: string,
     updates: Partial<Table>,
     renameSection?: { from: string; to: string }
   ) => {
-    let updated = localTables.map(t =>
-      t.id === tableId ? { ...t, ...updates } : t
-    )
+    let updated = localTables.map(t => t.id === tableId ? { ...t, ...updates } : t)
     if (renameSection) {
-      updated = updated.map(t =>
-        t.section === renameSection.from ? { ...t, section: renameSection.to } : t
-      )
+      updated = updated.map(t => t.section === renameSection.from ? { ...t, section: renameSection.to } : t)
     }
+    tablesRef.current = updated
     setLocalTables(updated)
     onTablesChange(updated)
-    setSelectedTableId(null)
+    setSelectedId(null)
   }
 
-  // ── Delete table ──────────────────────────────────────────────────────────
   const handleDeleteTable = (tableId: string) => {
     const updated = localTables.filter(t => t.id !== tableId)
+    tablesRef.current = updated
     setLocalTables(updated)
     onTablesChange(updated)
-    setSelectedTableId(null)
+    setSelectedId(null)
   }
 
-  // ── Derived data ──────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
   const overlapping = findOverlaps(localTables)
   const sectionDividers = computeSectionDividers(localTables)
   const allSections = [...new Set(localTables.map(t => t.section).filter(Boolean))] as string[]
   const sectionCounts: Record<string, number> = {}
-  for (const t of localTables) {
-    if (t.section) sectionCounts[t.section] = (sectionCounts[t.section] ?? 0) + 1
-  }
-  const selectedTable = selectedTableId ? localTables.find(t => t.id === selectedTableId) : undefined
-  const currentDraggingId = isDragging ? dragRef.current?.tableId : undefined
-
-  const resetZoom = () => setTransform(INITIAL)
+  for (const t of localTables) if (t.section) sectionCounts[t.section] = (sectionCounts[t.section] ?? 0) + 1
+  const selectedTable = selectedId ? localTables.find(t => t.id === selectedId) : undefined
+  const isDraggingId = pointerRef.current?.kind === 'table' ? pointerRef.current.tableId : undefined
 
   return (
     <div className="relative flex flex-col h-full bg-gray-50">
-      {/* Edit mode banner */}
+      {/* Banner */}
       <div className="shrink-0 bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center justify-between text-sm z-10">
         <span className="text-amber-800 font-medium">
-          ✏️ Layout Editor — drag tables to reposition
+          ✏️ Layout Editor — drag tables · tap to edit · pinch to zoom
         </span>
         <button
           onClick={handleAddTable}
@@ -410,28 +364,18 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         </button>
       </div>
 
-      {/* Zoom controls */}
+      {/* Zoom buttons */}
       <div className="absolute bottom-4 right-4 z-20 flex flex-col gap-2">
-        <button
-          onClick={() => setTransform(p => clampTransform({ ...p, scale: p.scale * 1.25 }))}
-          className="w-10 h-10 rounded-full bg-white shadow-md border border-gray-200 text-xl font-bold text-gray-700 flex items-center justify-center hover:bg-gray-50 active:scale-95"
-          aria-label="Zoom in"
-        >+</button>
-        <button
-          onClick={() => setTransform(p => clampTransform({ ...p, scale: p.scale * 0.8 }))}
-          className="w-10 h-10 rounded-full bg-white shadow-md border border-gray-200 text-xl font-bold text-gray-700 flex items-center justify-center hover:bg-gray-50 active:scale-95"
-          aria-label="Zoom out"
-        >−</button>
+        <button onClick={() => setTransform(p => clamp({ ...p, scale: p.scale * 1.25 }))}
+          className="w-10 h-10 rounded-full bg-white shadow-md border border-gray-200 text-xl font-bold text-gray-700 flex items-center justify-center hover:bg-gray-50 active:scale-95">+</button>
+        <button onClick={() => setTransform(p => clamp({ ...p, scale: p.scale * 0.8 }))}
+          className="w-10 h-10 rounded-full bg-white shadow-md border border-gray-200 text-xl font-bold text-gray-700 flex items-center justify-center hover:bg-gray-50 active:scale-95">−</button>
         {(transform.scale !== 1 || transform.x !== 0 || transform.y !== 0) && (
-          <button
-            onClick={resetZoom}
-            className="w-10 h-10 rounded-full bg-white shadow-md border border-gray-200 text-xs font-semibold text-gray-600 flex items-center justify-center hover:bg-gray-50 active:scale-95"
-            aria-label="Reset zoom"
-          >⌂</button>
+          <button onClick={() => setTransform(INITIAL)}
+            className="w-10 h-10 rounded-full bg-white shadow-md border border-gray-200 text-xs font-semibold text-gray-600 flex items-center justify-center hover:bg-gray-50 active:scale-95">⌂</button>
         )}
       </div>
 
-      {/* Zoom level indicator */}
       {transform.scale !== 1 && (
         <div className="absolute top-12 right-4 z-20 bg-black/40 text-white text-xs px-2 py-1 rounded-full pointer-events-none">
           {Math.round(transform.scale * 100)}%
@@ -442,54 +386,44 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
       <div
         ref={containerRef}
         className="flex-1 relative overflow-hidden"
-        style={{
-          cursor: isDragging ? 'grabbing' : 'grab',
-          touchAction: 'none',
-        }}
+        style={{ cursor: pointerRef.current?.kind === 'table' ? 'grabbing' : 'grab', touchAction: 'none' }}
         onMouseDown={onMouseDown}
-        onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp}
-        onMouseLeave={onMouseUp}
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
         onTouchEnd={onTouchEnd}
       >
-        <div
-          style={{
-            transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
-            transformOrigin: '0 0',
-            width: '100%',
-            height: '100%',
-            willChange: 'transform',
-          }}
-        >
-          <div className="absolute inset-0 p-4">
+        <div style={{
+          transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
+          transformOrigin: '0 0',
+          width: '100%',
+          height: '100%',
+          willChange: 'transform',
+        }}>
+          <div className="absolute inset-0 p-2">
             <svg
               ref={svgRef}
-              viewBox="0 0 100 100"
+              viewBox={VIEWBOX}
               className="w-full h-full"
               style={{ touchAction: 'none' }}
             >
-              {/* Grid pattern */}
+              {/* Grid — covers the full padded area */}
               <defs>
                 <pattern id="editGrid" width="10" height="10" patternUnits="userSpaceOnUse">
-                  <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#e5e7eb" strokeWidth="0.25" />
+                  <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#e5e7eb" strokeWidth="0.3" />
                 </pattern>
               </defs>
-              <rect width="100" height="100" fill="url(#editGrid)" />
+              <rect x={-VIEW_PAD} y={-VIEW_PAD} width={VIEW_SIZE} height={VIEW_SIZE} fill="url(#editGrid)" />
+
+              {/* Boundary of the 0-100 table area — subtle guide */}
+              <rect x="0" y="0" width="100" height="100" fill="none" stroke="#d1d5db" strokeWidth="0.4" strokeDasharray="2,2" rx="1" />
 
               {/* Section dividers */}
               {sectionDividers.map(d => (
                 <g key={d.label}>
-                  <line
-                    x1="5" y1={d.y} x2="95" y2={d.y}
-                    stroke="#d1d5db" strokeWidth="0.3" strokeDasharray="1,1"
-                  />
-                  <text
-                    x="50" y={d.y + 3}
-                    textAnchor="middle" fontSize="2.5"
-                    fill="#9ca3af" fontWeight="600" fontFamily="system-ui"
-                  >
+                  <line x1={-VIEW_PAD + 2} y1={d.y} x2={100 + VIEW_PAD - 2} y2={d.y}
+                    stroke="#d1d5db" strokeWidth="0.3" strokeDasharray="1,1" />
+                  <text x="50" y={d.y + 3.5}
+                    textAnchor="middle" fontSize="2.5" fill="#9ca3af" fontWeight="600" fontFamily="system-ui">
                     ─── {d.label.toUpperCase()} ───
                   </text>
                 </g>
@@ -497,78 +431,47 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
 
               {/* Tables */}
               {localTables.map(table => {
-                const isSelected = table.id === selectedTableId
-                const isOverlapping = overlapping.has(table.id)
-                const isDraggingThis = table.id === currentDraggingId
+                const isSelected = table.id === selectedId
+                const isOver = overlapping.has(table.id)
                 const { x, y } = table.position
                 const { w, h } = table.size
                 const rx = table.shape === 'round' ? Math.min(w, h) / 2 : 2
 
                 return (
-                  <g
-                    key={table.id}
-                    style={{ cursor: isDraggingThis ? 'grabbing' : 'grab' }}
-                  >
-                    {/* Selection highlight ring */}
+                  <g key={table.id} style={{ cursor: table.id === isDraggingId ? 'grabbing' : 'grab' }}>
                     {isSelected && (
-                      <rect
-                        x={x - 1.5} y={y - 1.5}
-                        width={w + 3} height={h + 3}
-                        rx={rx + 1.5}
-                        fill="none"
-                        stroke="#f59e0b"
-                        strokeWidth="0.8"
-                      />
+                      <rect x={x - 1.5} y={y - 1.5} width={w + 3} height={h + 3}
+                        rx={rx + 1.5} fill="none" stroke="#f59e0b" strokeWidth="0.8" />
                     )}
-
-                    {/* Table body */}
-                    <rect
-                      x={x} y={y} width={w} height={h}
-                      rx={rx} ry={rx}
-                      fill={isOverlapping ? '#fef9c3' : '#f3f4f6'}
-                      stroke={isOverlapping ? '#ef4444' : isSelected ? '#f59e0b' : '#9ca3af'}
-                      strokeWidth={isSelected || isOverlapping ? 0.6 : 0.4}
+                    <rect x={x} y={y} width={w} height={h} rx={rx} ry={rx}
+                      fill={isOver ? '#fef9c3' : '#f3f4f6'}
+                      stroke={isOver ? '#ef4444' : isSelected ? '#f59e0b' : '#9ca3af'}
+                      strokeWidth={isSelected || isOver ? 0.6 : 0.4}
                       strokeDasharray="1.5,0.8"
                       style={{ transition: 'fill 0.15s, stroke 0.15s' }}
                     />
-
-                    {/* Table number */}
-                    <text
-                      x={x + w / 2} y={y + h * 0.4}
+                    <text x={x + w / 2} y={y + h * 0.4}
                       textAnchor="middle" fontSize="2.8" fontWeight="700"
-                      fill={isOverlapping ? '#b45309' : '#374151'}
-                      fontFamily="system-ui"
-                    >
+                      fill={isOver ? '#b45309' : '#374151'} fontFamily="system-ui"
+                      style={{ pointerEvents: 'none', userSelect: 'none' }}>
                       {table.number}
                     </text>
-
-                    {/* Capacity */}
-                    <text
-                      x={x + w / 2} y={y + h * 0.72}
-                      textAnchor="middle" fontSize="1.8"
-                      fill="#9ca3af" fontFamily="system-ui"
-                    >
+                    <text x={x + w / 2} y={y + h * 0.72}
+                      textAnchor="middle" fontSize="1.8" fill="#9ca3af" fontFamily="system-ui"
+                      style={{ pointerEvents: 'none', userSelect: 'none' }}>
                       cap {table.capacity}
                     </text>
-
-                    {/* Drag handle ⠿ in top-right corner */}
-                    <text
-                      x={x + w - 1} y={y + 3.5}
+                    <text x={x + w - 1} y={y + 3.5}
                       textAnchor="end" fontSize="2.2"
-                      fill={isSelected ? '#f59e0b' : '#c4c4c4'}
-                      fontFamily="system-ui"
-                      style={{ pointerEvents: 'none', userSelect: 'none' }}
-                    >
+                      fill={isSelected ? '#f59e0b' : '#c4c4c4'} fontFamily="system-ui"
+                      style={{ pointerEvents: 'none', userSelect: 'none' }}>
                       ⠿
                     </text>
-
-                    {/* Overlap warning */}
-                    {isOverlapping && (
-                      <text
-                        x={x + w / 2} y={y + h * 0.95}
-                        textAnchor="middle" fontSize="1.6"
-                        fill="#ef4444" fontFamily="system-ui" fontWeight="600"
-                      >
+                    {isOver && (
+                      <text x={x + w / 2} y={y + h * 0.95}
+                        textAnchor="middle" fontSize="1.6" fill="#ef4444"
+                        fontFamily="system-ui" fontWeight="600"
+                        style={{ pointerEvents: 'none', userSelect: 'none' }}>
                         ⚠ overlap
                       </text>
                     )}
@@ -588,7 +491,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
           sectionCounts={sectionCounts}
           onSave={handleSettingsSave}
           onDelete={handleDeleteTable}
-          onClose={() => setSelectedTableId(null)}
+          onClose={() => setSelectedId(null)}
         />
       )}
     </div>
