@@ -74,13 +74,17 @@ export const useStore = create<Store>()(
       },
 
       moveGroup: (groupId, newTableId) => {
-        const { groups } = get()
+        const { groups, floorPlan } = get()
         const group = groups.find(g => g.id === groupId)
         if (!group) return
         const oldTableId = group.tableId
+        const oldTable = floorPlan.tables.find(t => t.id === oldTableId)
+        // Append old table number in brackets, but don't double-append if moved again
+        const baseName = group.name.replace(/\s*\(.*\)$/, '')
+        const newName = oldTable ? `${baseName} (${oldTable.number})` : baseName
         set(state => ({
           groups: state.groups.map(g =>
-            g.id === groupId ? { ...g, tableId: newTableId } : g
+            g.id === groupId ? { ...g, tableId: newTableId, name: newName } : g
           ),
           floorPlan: {
             ...state.floorPlan,
