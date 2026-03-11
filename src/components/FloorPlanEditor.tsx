@@ -14,7 +14,6 @@ interface Transform { scale: number; x: number; y: number }
 const MIN_SCALE = 0.4
 const MAX_SCALE = 5
 const INITIAL: Transform = { scale: 1, x: 0, y: 0 }
-const SVG_PADDING = 8 // matches Tailwind p-2 on the SVG wrapper div
 
 interface DragState {
   kind: 'table'
@@ -23,10 +22,9 @@ interface DragState {
   startClientY: number
   startTableX: number
   startTableY: number
-  // Captured at drag-start so delta calc stays consistent even if viewBox changes mid-drag
-  svgNaturalW: number
-  svgNaturalH: number
-  vbX: number; vbY: number; vbW: number; vbH: number
+  // SVG coords at pointer-down — used for delta calc so speed is always 1:1
+  startSvgX: number
+  startSvgY: number
   moved: boolean
 }
 
@@ -67,12 +65,6 @@ function commonSection(tables: Table[]): string {
   return c.size === 0 ? 'Main' : [...c.entries()].sort((a, b) => b[1] - a[1])[0][0]
 }
 
-// Parse a "minX minY width height" viewBox string into parts
-function parseVB(vbStr: string) {
-  const [x, y, w, h] = vbStr.split(' ').map(Number)
-  return { x, y, w, h }
-}
-
 export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props) {
   const [localTables, setLocalTables] = useState<Table[]>(initialTables)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -84,57 +76,33 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
   const pointerRef = useRef<PointerState>(null)
   const lastPinchDist = useRef<number | null>(null)
 
-  // Refs so always-on global handlers can read current values without stale closures
+  // Refs for stable access from always-on global handlers
   const tablesRef = useRef(localTables)
   const transformRef = useRef(INITIAL)
-  const viewBoxRef = useRef(computeViewBox(localTables))
-  const selectedIdSetRef = useRef(setSelectedId)
-  const draggingIdSetRef = useRef(setDraggingId)
 
   useEffect(() => { tablesRef.current = localTables }, [localTables])
   useEffect(() => { transformRef.current = transform }, [transform])
-  useEffect(() => { viewBoxRef.current = computeViewBox(localTables) }, [localTables])
 
   const clamp = (t: Transform): Transform => ({
     scale: Math.min(MAX_SCALE, Math.max(MIN_SCALE, t.scale)),
     x: t.x, y: t.y,
   })
 
-  // ── Coordinate conversion ─────────────────────────────────────────────────
-  // Key: use the CONTAINER rect (not transformed) + manually undo CSS transform.
-  // This avoids getBoundingClientRect() of the transformed SVG child returning
-  // scaled dimensions, which would make table drag speed depend on zoom level.
-
-  const getContainerMetrics = useCallback(() => {
-    const container = containerRef.current
-    if (!container) return null
-    const rect = container.getBoundingClientRect()
-    const t = transformRef.current
-    const vbStr = viewBoxRef.current
-    const vb = parseVB(vbStr)
-    // Natural SVG dimensions (before CSS transform is applied)
-    const svgNaturalW = rect.width - SVG_PADDING * 2
-    const svgNaturalH = rect.height - SVG_PADDING * 2
-    return { rect, t, vb, svgNaturalW, svgNaturalH }
+  // ── Coordinate conversion via getScreenCTM ─────────────────────────────────
+  // getScreenCTM() returns the browser's exact matrix from SVG user space → screen.
+  // Its inverse maps screen coords → SVG coords, accounting for all CSS transforms,
+  // viewBox, padding, scroll — no manual math needed.
+  const clientToSVG = useCallback((clientX: number, clientY: number) => {
+    const svg = svgRef.current
+    if (!svg) return null
+    const ctm = svg.getScreenCTM()
+    if (!ctm) return null
+    const pt = svg.createSVGPoint()
+    pt.x = clientX
+    pt.y = clientY
+    const { x, y } = pt.matrixTransform(ctm.inverse())
+    return { x, y }
   }, [])
-
-  // Convert client (screen) coords → SVG coordinate space
-  const toSVG = useCallback((clientX: number, clientY: number) => {
-    const m = getContainerMetrics()
-    if (!m) return null
-    const { rect, t, vb, svgNaturalW, svgNaturalH } = m
-    // Position within container in screen pixels
-    const screenX = clientX - rect.left
-    const screenY = clientY - rect.top
-    // Undo CSS transform: transform-origin is 0 0, so: screen = t.xy + scale * natural
-    const naturalX = (screenX - t.x) / t.scale
-    const naturalY = (screenY - t.y) / t.scale
-    // Convert from natural SVG-wrapper space (with padding) to SVG coordinate space
-    return {
-      x: vb.x + (naturalX - SVG_PADDING) * vb.w / svgNaturalW,
-      y: vb.y + (naturalY - SVG_PADDING) * vb.h / svgNaturalH,
-    }
-  }, [getContainerMetrics])
 
   // Find topmost table at SVG coords
   const getTableAt = useCallback((svgX: number, svgY: number): Table | undefined => {
@@ -155,9 +123,9 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     const mx = e.clientX - rect.left
     const my = e.clientY - rect.top
     setTransform(prev => {
-      const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * (1 - e.deltaY * 0.001)))
-      const ratio = newScale / prev.scale
-      return clamp({ scale: newScale, x: mx - ratio * (mx - prev.x), y: my - ratio * (my - prev.y) })
+      const s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * (1 - e.deltaY * 0.001)))
+      const r = s / prev.scale
+      return clamp({ scale: s, x: mx - r * (mx - prev.x), y: my - r * (my - prev.y) })
     })
   }, [])
 
@@ -173,8 +141,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     const getClient = (e: MouseEvent | TouchEvent): { x: number; y: number } | null => {
       if ('touches' in e) {
         const src = e.touches.length > 0 ? e.touches[0]
-          : (e as TouchEvent).changedTouches.length > 0 ? (e as TouchEvent).changedTouches[0]
-          : null
+          : (e as TouchEvent).changedTouches?.[0] ?? null
         return src ? { x: src.clientX, y: src.clientY } : null
       }
       return { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }
@@ -193,13 +160,18 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         ptr.moved = true
         e.preventDefault()
 
-        // Use dimensions captured at drag-start so speed is 1:1 with cursor at any zoom
-        const t = transformRef.current
-        const dxSvg = (dx / t.scale) * ptr.vbW / ptr.svgNaturalW
-        const dySvg = (dy / t.scale) * ptr.vbH / ptr.svgNaturalH
+        // Convert current pointer position to SVG coords and compute delta from drag start
+        const svg = svgRef.current
+        if (!svg) return
+        const ctm = svg.getScreenCTM()
+        if (!ctm) return
+        const pt = svg.createSVGPoint()
+        pt.x = client.x
+        pt.y = client.y
+        const cur = pt.matrixTransform(ctm.inverse())
 
-        const newX = Math.max(-50, Math.min(150, ptr.startTableX + dxSvg))
-        const newY = Math.max(-50, Math.min(150, ptr.startTableY + dySvg))
+        const newX = Math.max(-50, Math.min(150, ptr.startTableX + (cur.x - ptr.startSvgX)))
+        const newY = Math.max(-50, Math.min(150, ptr.startTableY + (cur.y - ptr.startSvgY)))
 
         tablesRef.current = tablesRef.current.map(t =>
           t.id === ptr.tableId ? { ...t, position: { x: newX, y: newY } } : t
@@ -216,16 +188,14 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     const handleUp = (_e: MouseEvent | TouchEvent) => {
       const ptr = pointerRef.current
       if (!ptr) return
-
       if (ptr.kind === 'table') {
         if (!ptr.moved) {
-          selectedIdSetRef.current(ptr.tableId)
+          setSelectedId(ptr.tableId)
         } else {
           onTablesChange(tablesRef.current)
         }
-        draggingIdSetRef.current(null)
+        setDraggingId(null)
       }
-
       pointerRef.current = null
     }
 
@@ -233,7 +203,6 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     window.addEventListener('touchmove', handleMove, { passive: false })
     window.addEventListener('mouseup', handleUp)
     window.addEventListener('touchend', handleUp)
-
     return () => {
       window.removeEventListener('mousemove', handleMove)
       window.removeEventListener('touchmove', handleMove)
@@ -242,15 +211,13 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     }
   }, [onTablesChange])
 
-  // ── Pointer down: start table drag or pan ─────────────────────────────────
+  // ── Pointer down ──────────────────────────────────────────────────────────
   const handlePointerDown = useCallback((clientX: number, clientY: number) => {
-    const svgPos = toSVG(clientX, clientY)
+    const svgPos = clientToSVG(clientX, clientY)
     if (!svgPos) return
 
     const table = getTableAt(svgPos.x, svgPos.y)
     if (table) {
-      const m = getContainerMetrics()
-      if (!m) return
       pointerRef.current = {
         kind: 'table',
         tableId: table.id,
@@ -258,10 +225,8 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         startClientY: clientY,
         startTableX: table.position.x,
         startTableY: table.position.y,
-        // Capture metrics at drag-start for consistent delta calculation
-        svgNaturalW: m.svgNaturalW,
-        svgNaturalH: m.svgNaturalH,
-        vbX: m.vb.x, vbY: m.vb.y, vbW: m.vb.w, vbH: m.vb.h,
+        startSvgX: svgPos.x,
+        startSvgY: svgPos.y,
         moved: false,
       }
       setDraggingId(table.id)
@@ -276,7 +241,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         startTy: t.y,
       }
     }
-  }, [toSVG, getTableAt, getContainerMetrics])
+  }, [clientToSVG, getTableAt])
 
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return
@@ -301,7 +266,8 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
       const el = containerRef.current
       if (!el || !lastPinchDist.current) return
       const rect = el.getBoundingClientRect()
-      const px = mid.x - rect.left, py = mid.y - rect.top
+      const px = mid.x - rect.left
+      const py = mid.y - rect.top
       const factor = dist / lastPinchDist.current
       setTransform(prev => {
         const s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * factor))
@@ -322,7 +288,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     let cx = 41, cy = 41
     if (el) {
       const rect = el.getBoundingClientRect()
-      const centre = toSVG(rect.left + rect.width / 2, rect.top + rect.height / 2)
+      const centre = clientToSVG(rect.left + rect.width / 2, rect.top + rect.height / 2)
       if (centre) { cx = centre.x - 9; cy = centre.y - 6 }
     }
     const newTable: Table = {
@@ -337,7 +303,6 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     }
     const updated = [...localTables, newTable]
     tablesRef.current = updated
-    viewBoxRef.current = computeViewBox(updated)
     setLocalTables(updated)
     onTablesChange(updated)
     setSelectedId(newTable.id)
@@ -378,7 +343,6 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
 
   return (
     <div className="relative flex flex-col h-full bg-gray-50">
-      {/* Banner */}
       <div className="shrink-0 bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center justify-between text-sm z-10">
         <span className="text-amber-800 font-medium">
           ✏️ Layout Editor — drag tables · tap to edit · pinch to zoom
@@ -391,7 +355,6 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         </button>
       </div>
 
-      {/* Zoom buttons */}
       <div className="absolute bottom-4 right-4 z-20 flex flex-col gap-2">
         <button onClick={() => setTransform(p => clamp({ ...p, scale: p.scale * 1.25 }))}
           className="w-10 h-10 rounded-full bg-white shadow-md border border-gray-200 text-xl font-bold text-gray-700 flex items-center justify-center hover:bg-gray-50 active:scale-95">+</button>
@@ -409,7 +372,6 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         </div>
       )}
 
-      {/* Canvas */}
       <div
         ref={containerRef}
         className="flex-1 relative overflow-hidden"
