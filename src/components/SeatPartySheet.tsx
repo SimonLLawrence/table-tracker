@@ -8,7 +8,9 @@ interface Props {
 }
 
 export function SeatPartySheet({ table, onClose }: Props) {
-  const [name, setName] = useState('')
+  const defaultName = `Table ${table.number.replace(/^T/, '')}`
+  const [name, setName] = useState(defaultName)
+  const [isPrefilled, setIsPrefilled] = useState(true)
   const [covers, setCovers] = useState(2)
   const [note, setNote] = useState('')
   const seatGroup = useStore(s => s.seatGroup)
@@ -36,10 +38,30 @@ export function SeatPartySheet({ table, onClose }: Props) {
           autoFocus
           type="text"
           value={name}
-          onChange={e => setName(e.target.value)}
+          onChange={e => {
+            setName(e.target.value)
+            setIsPrefilled(false)
+          }}
+          onKeyDown={e => {
+            if (isPrefilled && e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
+              // First real character typed — clear the prefilled name
+              setName(e.key)
+              setIsPrefilled(false)
+              e.preventDefault()
+            } else if (e.key === 'Enter') {
+              handleSeat()
+            }
+          }}
+          onFocus={e => {
+            // Select all on focus so user can see it's pre-filled and easily replace it
+            if (isPrefilled) e.target.select()
+          }}
           placeholder='e.g. "Johnson" or "Table of 3"'
-          className="w-full border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          onKeyDown={e => e.key === 'Enter' && handleSeat()}
+          className={`w-full border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+            isPrefilled
+              ? 'border-blue-300 bg-blue-50 text-blue-700'
+              : 'border-gray-300 text-gray-900'
+          }`}
           maxLength={40}
         />
       </div>
