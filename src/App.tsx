@@ -138,24 +138,14 @@ export default function App() {
 
       {/* Mobile layout */}
       <div className="flex md:hidden flex-col flex-1 overflow-hidden">
-        {mobileTab === 'guests' ? (
-          <CustomerList
-            onSelectGroup={handleSelectGroup}
-            onAddWalkIn={handleAddWalkIn}
-          />
-        ) : (
-          <FloorPlan
-            onSelectTable={handleTableClick}
-            walkInMode={walkInMode}
-            onCancelWalkIn={() => setWalkInMode(false)}
-          />
-        )}
-        {/* Tab bar */}
-        <div className="shrink-0 flex border-t border-gray-200 bg-white">
+        {/* Tab bar — top, always visible */}
+        <div className="shrink-0 flex border-b border-gray-200 bg-white z-10">
           <button
             onClick={() => setMobileTab('guests')}
             className={`flex-1 py-3 text-sm font-semibold transition-colors ${
-              mobileTab === 'guests' ? 'text-[#1a1a2e] border-t-2 border-[#1a1a2e]' : 'text-gray-400'
+              mobileTab === 'guests'
+                ? 'text-[#1a1a2e] border-b-2 border-[#1a1a2e]'
+                : 'text-gray-400'
             }`}
           >
             👥 Guests
@@ -163,11 +153,28 @@ export default function App() {
           <button
             onClick={() => setMobileTab('floor')}
             className={`flex-1 py-3 text-sm font-semibold transition-colors ${
-              mobileTab === 'floor' ? 'text-[#1a1a2e] border-t-2 border-[#1a1a2e]' : 'text-gray-400'
+              mobileTab === 'floor'
+                ? 'text-[#1a1a2e] border-b-2 border-[#1a1a2e]'
+                : 'text-gray-400'
             }`}
           >
             🗺 Floor
           </button>
+        </div>
+        {/* Panel content */}
+        <div className="flex-1 overflow-hidden">
+          {mobileTab === 'guests' ? (
+            <CustomerList
+              onSelectGroup={handleSelectGroup}
+              onAddWalkIn={handleAddWalkIn}
+            />
+          ) : (
+            <FloorPlan
+              onSelectTable={handleTableClick}
+              walkInMode={walkInMode}
+              onCancelWalkIn={() => setWalkInMode(false)}
+            />
+          )}
         </div>
       </div>
 

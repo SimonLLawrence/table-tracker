@@ -107,16 +107,15 @@ export function FloorPlan({ onSelectTable, walkInMode = false, onCancelWalkIn }:
       })
       lastPinchDist.current = dist
       lastPinchMid.current = mid
-    } else if (e.touches.length === 1 && dragStart.current) {
-      const dx = e.touches[0].clientX - dragStart.current.x
-      const dy = e.touches[0].clientY - dragStart.current.y
+    } else if (e.touches.length === 1) {
+      // Snapshot ref to avoid race condition where it's nulled mid-setState
+      const drag = dragStart.current
+      if (!drag) return
+      const dx = e.touches[0].clientX - drag.x
+      const dy = e.touches[0].clientY - drag.y
       if (Math.abs(dx) > 4 || Math.abs(dy) > 4) didDrag.current = true
       if (didDrag.current) {
-        setTransform(prev => ({
-          ...prev,
-          x: dragStart.current!.tx + dx,
-          y: dragStart.current!.ty + dy,
-        }))
+        setTransform(prev => ({ ...prev, x: drag.tx + dx, y: drag.ty + dy }))
       }
     }
   }
@@ -137,16 +136,14 @@ export function FloorPlan({ onSelectTable, walkInMode = false, onCancelWalkIn }:
   }
 
   const onMouseMove = (e: React.MouseEvent) => {
-    if (!dragStart.current) return
-    const dx = e.clientX - dragStart.current.x
-    const dy = e.clientY - dragStart.current.y
+    // Snapshot ref immediately to avoid race condition where it's nulled mid-setState
+    const drag = dragStart.current
+    if (!drag) return
+    const dx = e.clientX - drag.x
+    const dy = e.clientY - drag.y
     if (Math.abs(dx) > 4 || Math.abs(dy) > 4) didDrag.current = true
     if (didDrag.current) {
-      setTransform(prev => ({
-        ...prev,
-        x: dragStart.current!.tx + dx,
-        y: dragStart.current!.ty + dy,
-      }))
+      setTransform(prev => ({ ...prev, x: drag.tx + dx, y: drag.ty + dy }))
     }
   }
 
