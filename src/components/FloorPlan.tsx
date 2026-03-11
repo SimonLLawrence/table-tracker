@@ -5,6 +5,8 @@ import { isAlert, truncate } from '../utils'
 
 interface Props {
   onSelectTable: (table: Table) => void
+  walkInMode?: boolean
+  onCancelWalkIn?: () => void
 }
 
 interface Transform {
@@ -17,7 +19,7 @@ const MIN_SCALE = 0.5
 const MAX_SCALE = 4
 const INITIAL: Transform = { scale: 1, x: 0, y: 0 }
 
-export function FloorPlan({ onSelectTable }: Props) {
+export function FloorPlan({ onSelectTable, walkInMode = false, onCancelWalkIn }: Props) {
   const { floorPlan, groups, moveMode, cancelMoveMode } = useStore()
   const containerRef = useRef<HTMLDivElement>(null)
   const [transform, setTransform] = useState<Transform>(INITIAL)
@@ -155,6 +157,8 @@ export function FloorPlan({ onSelectTable }: Props) {
     if (didDrag.current) return
     if (moveMode.active) {
       if (table.status === 'free') onSelectTable(table)
+    } else if (walkInMode) {
+      if (table.status === 'free') onSelectTable(table)
     } else {
       onSelectTable(table)
     }
@@ -168,6 +172,11 @@ export function FloorPlan({ onSelectTable }: Props) {
       const sourceTable = floorPlan.tables.find(t => t.currentGroupId === moveMode.groupId)
       if (table.id === sourceTable?.id)
         return { bg: '#fbbf24', border: '#f59e0b', text: '#92400e' }
+      if (table.status === 'free')
+        return { bg: '#22c55e', border: '#16a34a', text: '#fff' }
+      return { bg: '#d1d5db', border: '#9ca3af', text: '#9ca3af' }
+    }
+    if (walkInMode) {
       if (table.status === 'free')
         return { bg: '#22c55e', border: '#16a34a', text: '#fff' }
       return { bg: '#d1d5db', border: '#9ca3af', text: '#9ca3af' }
@@ -192,6 +201,17 @@ export function FloorPlan({ onSelectTable }: Props) {
           </span>
           <button
             onClick={cancelMoveMode}
+            className="ml-4 px-3 py-1 rounded-full bg-white/20 hover:bg-white/30 text-white text-xs font-semibold"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      {walkInMode && !moveMode.active && (
+        <div className="shrink-0 bg-green-600 text-white px-4 py-2 flex items-center justify-between text-sm font-medium z-10">
+          <span>➕ Walk-in — tap a free table to seat a party</span>
+          <button
+            onClick={onCancelWalkIn}
             className="ml-4 px-3 py-1 rounded-full bg-white/20 hover:bg-white/30 text-white text-xs font-semibold"
           >
             Cancel

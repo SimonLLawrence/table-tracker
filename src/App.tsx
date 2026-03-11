@@ -21,22 +21,34 @@ export default function App() {
   const [sheet, setSheet] = useState<ActiveSheet>(null)
   const [mobileTab, setMobileTab] = useState<MobileTab>('guests')
   const [moveDest, setMoveDest] = useState<Table | null>(null)
+  const [walkInMode, setWalkInMode] = useState(false)
   const { groups, moveMode } = useStore()
 
   // Clear moveDest when moveMode becomes inactive
   useEffect(() => {
-    if (!moveMode.active) {
-      setMoveDest(null)
-    }
+    if (!moveMode.active) setMoveDest(null)
   }, [moveMode.active])
 
+  // Exit walk-in mode if a sheet opens or move mode activates
+  useEffect(() => {
+    if (sheet || moveMode.active) setWalkInMode(false)
+  }, [sheet, moveMode.active])
+
   const handleTableClick = (table: Table) => {
-    if (moveMode.active && moveMode.groupId) {
+    // Walk-in mode: only allow picking a free table
+    if (walkInMode) {
       if (table.status === 'free') {
-        setMoveDest(table)
+        setWalkInMode(false)
+        setSheet({ type: 'seat', table })
       }
       return
     }
+
+    if (moveMode.active && moveMode.groupId) {
+      if (table.status === 'free') setMoveDest(table)
+      return
+    }
+
     if (table.status === 'free') {
       setSheet({ type: 'seat', table })
     } else if (table.currentGroupId) {
@@ -50,8 +62,8 @@ export default function App() {
   }
 
   const handleAddWalkIn = () => {
-    // Switch to floor plan on mobile so user can pick a table
-    setMobileTab('floor')
+    setWalkInMode(true)
+    setMobileTab('floor') // switch to floor on mobile
   }
 
   return (
@@ -67,7 +79,11 @@ export default function App() {
           />
         </div>
         <div className="flex-1 overflow-hidden">
-          <FloorPlan onSelectTable={handleTableClick} />
+          <FloorPlan
+            onSelectTable={handleTableClick}
+            walkInMode={walkInMode}
+            onCancelWalkIn={() => setWalkInMode(false)}
+          />
         </div>
       </div>
 
@@ -79,7 +95,11 @@ export default function App() {
             onAddWalkIn={handleAddWalkIn}
           />
         ) : (
-          <FloorPlan onSelectTable={handleTableClick} />
+          <FloorPlan
+            onSelectTable={handleTableClick}
+            walkInMode={walkInMode}
+            onCancelWalkIn={() => setWalkInMode(false)}
+          />
         )}
         {/* Tab bar */}
         <div className="shrink-0 flex border-t border-gray-200 bg-white">
@@ -103,19 +123,13 @@ export default function App() {
       </div>
 
       {/* Bottom sheets */}
-      <BottomSheet
-        open={sheet?.type === 'seat'}
-        onClose={() => setSheet(null)}
-      >
+      <BottomSheet open={sheet?.type === 'seat'} onClose={() => setSheet(null)}>
         {sheet?.type === 'seat' && (
           <SeatPartySheet table={sheet.table} onClose={() => setSheet(null)} />
         )}
       </BottomSheet>
 
-      <BottomSheet
-        open={sheet?.type === 'group'}
-        onClose={() => setSheet(null)}
-      >
+      <BottomSheet open={sheet?.type === 'group'} onClose={() => setSheet(null)}>
         {sheet?.type === 'group' && (
           <GroupDetailSheet group={sheet.group} onClose={() => setSheet(null)} />
         )}
