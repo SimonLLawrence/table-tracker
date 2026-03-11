@@ -9,18 +9,12 @@ interface Props {
   onTablesChange: (tables: Table[]) => void
 }
 
-interface Transform {
-  scale: number
-  x: number
-  y: number
-}
-
-// Extra padding used when converting client → SVG coords; must match computeViewBox's VIEW_PAD
-const COORD_PAD = 10
+interface Transform { scale: number; x: number; y: number }
 
 const MIN_SCALE = 0.4
 const MAX_SCALE = 5
 const INITIAL: Transform = { scale: 1, x: 0, y: 0 }
+const SVG_PADDING = 8 // matches Tailwind p-2 on the SVG wrapper div
 
 interface DragState {
   kind: 'table'
@@ -29,8 +23,10 @@ interface DragState {
   startClientY: number
   startTableX: number
   startTableY: number
-  tableW: number
-  tableH: number
+  // Captured at drag-start so delta calc stays consistent even if viewBox changes mid-drag
+  svgNaturalW: number
+  svgNaturalH: number
+  vbX: number; vbY: number; vbW: number; vbH: number
   moved: boolean
 }
 
@@ -71,6 +67,12 @@ function commonSection(tables: Table[]): string {
   return c.size === 0 ? 'Main' : [...c.entries()].sort((a, b) => b[1] - a[1])[0][0]
 }
 
+// Parse a "minX minY width height" viewBox string into parts
+function parseVB(vbStr: string) {
+  const [x, y, w, h] = vbStr.split(' ').map(Number)
+  return { x, y, w, h }
+}
+
 export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props) {
   const [localTables, setLocalTables] = useState<Table[]>(initialTables)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -81,32 +83,60 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
   const svgRef = useRef<SVGSVGElement>(null)
   const pointerRef = useRef<PointerState>(null)
   const lastPinchDist = useRef<number | null>(null)
+
+  // Refs so always-on global handlers can read current values without stale closures
   const tablesRef = useRef(localTables)
-  const selectedIdRef = useRef<string | null>(null)
-  const setSelectedIdRef = useRef(setSelectedId)
+  const transformRef = useRef(INITIAL)
+  const viewBoxRef = useRef(computeViewBox(localTables))
+  const selectedIdSetRef = useRef(setSelectedId)
+  const draggingIdSetRef = useRef(setDraggingId)
 
   useEffect(() => { tablesRef.current = localTables }, [localTables])
-  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+  useEffect(() => { transformRef.current = transform }, [transform])
+  useEffect(() => { viewBoxRef.current = computeViewBox(localTables) }, [localTables])
 
   const clamp = (t: Transform): Transform => ({
     scale: Math.min(MAX_SCALE, Math.max(MIN_SCALE, t.scale)),
     x: t.x, y: t.y,
   })
 
-  // Convert client → SVG coords (getBoundingClientRect on the SVG accounts for zoom/pan)
-  const toSVG = useCallback((clientX: number, clientY: number) => {
-    const svgEl = svgRef.current
-    if (!svgEl) return null
-    const rect = svgEl.getBoundingClientRect()
-    if (!rect.width) return null
-    // Parse the current viewBox to get origin and size
-    const vb = svgEl.viewBox.baseVal
-    return {
-      x: vb.x + (clientX - rect.left) * vb.width / rect.width,
-      y: vb.y + (clientY - rect.top) * vb.height / rect.height,
-    }
+  // ── Coordinate conversion ─────────────────────────────────────────────────
+  // Key: use the CONTAINER rect (not transformed) + manually undo CSS transform.
+  // This avoids getBoundingClientRect() of the transformed SVG child returning
+  // scaled dimensions, which would make table drag speed depend on zoom level.
+
+  const getContainerMetrics = useCallback(() => {
+    const container = containerRef.current
+    if (!container) return null
+    const rect = container.getBoundingClientRect()
+    const t = transformRef.current
+    const vbStr = viewBoxRef.current
+    const vb = parseVB(vbStr)
+    // Natural SVG dimensions (before CSS transform is applied)
+    const svgNaturalW = rect.width - SVG_PADDING * 2
+    const svgNaturalH = rect.height - SVG_PADDING * 2
+    return { rect, t, vb, svgNaturalW, svgNaturalH }
   }, [])
 
+  // Convert client (screen) coords → SVG coordinate space
+  const toSVG = useCallback((clientX: number, clientY: number) => {
+    const m = getContainerMetrics()
+    if (!m) return null
+    const { rect, t, vb, svgNaturalW, svgNaturalH } = m
+    // Position within container in screen pixels
+    const screenX = clientX - rect.left
+    const screenY = clientY - rect.top
+    // Undo CSS transform: transform-origin is 0 0, so: screen = t.xy + scale * natural
+    const naturalX = (screenX - t.x) / t.scale
+    const naturalY = (screenY - t.y) / t.scale
+    // Convert from natural SVG-wrapper space (with padding) to SVG coordinate space
+    return {
+      x: vb.x + (naturalX - SVG_PADDING) * vb.w / svgNaturalW,
+      y: vb.y + (naturalY - SVG_PADDING) * vb.h / svgNaturalH,
+    }
+  }, [getContainerMetrics])
+
+  // Find topmost table at SVG coords
   const getTableAt = useCallback((svgX: number, svgY: number): Table | undefined => {
     const ts = tablesRef.current
     for (let i = ts.length - 1; i >= 0; i--) {
@@ -138,15 +168,14 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     return () => el.removeEventListener('wheel', onWheel)
   }, [onWheel])
 
-  // ── Always-on global move/up handlers (fixes fast-tap bug) ───────────────
+  // ── Always-on global move/up handlers ────────────────────────────────────
   useEffect(() => {
-    const getClient = (e: MouseEvent | TouchEvent) => {
+    const getClient = (e: MouseEvent | TouchEvent): { x: number; y: number } | null => {
       if ('touches' in e) {
-        return e.touches.length > 0
-          ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
-          : ('changedTouches' in e && e.changedTouches.length > 0)
-            ? { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY }
-            : null
+        const src = e.touches.length > 0 ? e.touches[0]
+          : (e as TouchEvent).changedTouches.length > 0 ? (e as TouchEvent).changedTouches[0]
+          : null
+        return src ? { x: src.clientX, y: src.clientY } : null
       }
       return { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }
     }
@@ -164,23 +193,13 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         ptr.moved = true
         e.preventDefault()
 
-        const svgRect = svgRef.current?.getBoundingClientRect()
-        if (!svgRect || svgRect.width === 0) return
-        // Use the SVG's current viewBox size for accurate coordinate mapping
-        const vb = svgRef.current?.viewBox.baseVal
-        const vbW = vb?.width ?? 120
-        const vbH = vb?.height ?? 120
-        const dxSvg = dx * vbW / svgRect.width
-        const dySvg = dy * vbH / svgRect.height
+        // Use dimensions captured at drag-start so speed is 1:1 with cursor at any zoom
+        const t = transformRef.current
+        const dxSvg = (dx / t.scale) * ptr.vbW / ptr.svgNaturalW
+        const dySvg = (dy / t.scale) * ptr.vbH / ptr.svgNaturalH
 
-        // Allow tables to be placed in a generous area beyond the original 0-100 space
-        const minX = -COORD_PAD * 3
-        const minY = -COORD_PAD * 3
-        const maxX = 100 + COORD_PAD * 3 - ptr.tableW
-        const maxY = 100 + COORD_PAD * 3 - ptr.tableH
-
-        const newX = Math.max(minX, Math.min(maxX, ptr.startTableX + dxSvg))
-        const newY = Math.max(minY, Math.min(maxY, ptr.startTableY + dySvg))
+        const newX = Math.max(-50, Math.min(150, ptr.startTableX + dxSvg))
+        const newY = Math.max(-50, Math.min(150, ptr.startTableY + dySvg))
 
         tablesRef.current = tablesRef.current.map(t =>
           t.id === ptr.tableId ? { ...t, position: { x: newX, y: newY } } : t
@@ -200,13 +219,11 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
 
       if (ptr.kind === 'table') {
         if (!ptr.moved) {
-          // Pure tap — open settings
-          setSelectedIdRef.current(ptr.tableId)
+          selectedIdSetRef.current(ptr.tableId)
         } else {
-          // Drag ended — commit
           onTablesChange(tablesRef.current)
         }
-        setDraggingId(null)
+        draggingIdSetRef.current(null)
       }
 
       pointerRef.current = null
@@ -225,13 +242,15 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     }
   }, [onTablesChange])
 
-  // ── Pointer down (mouse + touch) ──────────────────────────────────────────
-  const handlePointerDown = useCallback((clientX: number, clientY: number, currentTransform: Transform) => {
+  // ── Pointer down: start table drag or pan ─────────────────────────────────
+  const handlePointerDown = useCallback((clientX: number, clientY: number) => {
     const svgPos = toSVG(clientX, clientY)
     if (!svgPos) return
 
     const table = getTableAt(svgPos.x, svgPos.y)
     if (table) {
+      const m = getContainerMetrics()
+      if (!m) return
       pointerRef.current = {
         kind: 'table',
         tableId: table.id,
@@ -239,37 +258,38 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         startClientY: clientY,
         startTableX: table.position.x,
         startTableY: table.position.y,
-        tableW: table.size.w,
-        tableH: table.size.h,
+        // Capture metrics at drag-start for consistent delta calculation
+        svgNaturalW: m.svgNaturalW,
+        svgNaturalH: m.svgNaturalH,
+        vbX: m.vb.x, vbY: m.vb.y, vbW: m.vb.w, vbH: m.vb.h,
         moved: false,
       }
       setDraggingId(table.id)
     } else {
-      // Tap on empty canvas — deselect and start pan
       setSelectedId(null)
+      const t = transformRef.current
       pointerRef.current = {
         kind: 'pan',
         startClientX: clientX,
         startClientY: clientY,
-        startTx: currentTransform.x,
-        startTy: currentTransform.y,
+        startTx: t.x,
+        startTy: t.y,
       }
     }
-  }, [toSVG, getTableAt])
+  }, [toSVG, getTableAt, getContainerMetrics])
 
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return
-    handlePointerDown(e.clientX, e.clientY, transform)
+    handlePointerDown(e.clientX, e.clientY)
   }
 
-  // ── Touch events ──────────────────────────────────────────────────────────
   const onTouchStart = (e: React.TouchEvent) => {
     if (e.touches.length === 2) {
       pointerRef.current = null
       const [a, b] = [e.touches[0], e.touches[1]]
       lastPinchDist.current = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY)
     } else if (e.touches.length === 1) {
-      handlePointerDown(e.touches[0].clientX, e.touches[0].clientY, transform)
+      handlePointerDown(e.touches[0].clientX, e.touches[0].clientY)
     }
   }
 
@@ -296,17 +316,15 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     lastPinchDist.current = null
   }
 
-  // ── Add table — placed at current viewport centre ─────────────────────────
+  // ── Add table at current viewport centre ──────────────────────────────────
   const handleAddTable = () => {
-    // Find the SVG coordinate at the centre of the visible container
     const el = containerRef.current
     let cx = 41, cy = 41
     if (el) {
       const rect = el.getBoundingClientRect()
       const centre = toSVG(rect.left + rect.width / 2, rect.top + rect.height / 2)
-      if (centre) { cx = centre.x - 9; cy = centre.y - 6 } // offset by half table size (18x12)
+      if (centre) { cx = centre.x - 9; cy = centre.y - 6 }
     }
-
     const newTable: Table = {
       id: uuidv4(),
       number: nextTableNumber(localTables),
@@ -319,6 +337,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
     }
     const updated = [...localTables, newTable]
     tablesRef.current = updated
+    viewBoxRef.current = computeViewBox(updated)
     setLocalTables(updated)
     onTablesChange(updated)
     setSelectedId(newTable.id)
@@ -394,7 +413,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
       <div
         ref={containerRef}
         className="flex-1 relative overflow-hidden"
-        style={{ cursor: pointerRef.current?.kind === 'table' ? 'grabbing' : 'grab', touchAction: 'none' }}
+        style={{ cursor: draggingId ? 'grabbing' : 'grab', touchAction: 'none' }}
         onMouseDown={onMouseDown}
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
@@ -412,18 +431,15 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
               ref={svgRef}
               viewBox={viewBox}
               className="w-full h-full"
-              style={{ touchAction: 'none' }}
+              style={{ touchAction: 'none', overflow: 'visible' }}
             >
-              {/* Grid — rendered behind everything using a large rect */}
               <defs>
                 <pattern id="editGrid" width="10" height="10" patternUnits="userSpaceOnUse">
                   <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#e5e7eb" strokeWidth="0.3" />
                 </pattern>
               </defs>
-              {/* Large grid background — always covers the visible area */}
               <rect x="-500" y="-500" width="1000" height="1000" fill="url(#editGrid)" />
 
-              {/* Section dividers */}
               {sectionDividers.map(d => (
                 <g key={d.label}>
                   <line x1="0" y1={d.y} x2="100" y2={d.y}
@@ -435,7 +451,6 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
                 </g>
               ))}
 
-              {/* Tables */}
               {localTables.map(table => {
                 const isSelected = table.id === selectedId
                 const isDragging = table.id === draggingId
@@ -444,50 +459,23 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
                 const { w, h } = table.size
                 const rx = table.shape === 'round' ? Math.min(w, h) / 2 : 2
 
-                // Colour scheme:
-                // dragging → blue (being moved)
-                // selected → amber (settings open)
-                // overlap  → red/yellow warning
-                // default  → grey
-                const fillColor = isDragging
-                  ? '#dbeafe'
-                  : isOver
-                    ? '#fef9c3'
-                    : isSelected
-                      ? '#fef3c7'
-                      : '#f3f4f6'
-                const strokeColor = isDragging
-                  ? '#3b82f6'
-                  : isOver
-                    ? '#ef4444'
-                    : isSelected
-                      ? '#f59e0b'
-                      : '#9ca3af'
-                const textColor = isDragging
-                  ? '#1d4ed8'
-                  : isOver
-                    ? '#b45309'
-                    : isSelected
-                      ? '#92400e'
-                      : '#374151'
+                const fillColor = isDragging ? '#dbeafe' : isOver ? '#fef9c3' : isSelected ? '#fef3c7' : '#f3f4f6'
+                const strokeColor = isDragging ? '#3b82f6' : isOver ? '#ef4444' : isSelected ? '#f59e0b' : '#9ca3af'
+                const textColor = isDragging ? '#1d4ed8' : isOver ? '#b45309' : isSelected ? '#92400e' : '#374151'
 
                 return (
                   <g key={table.id} style={{ cursor: isDragging ? 'grabbing' : 'grab' }}>
-                    {/* Glow ring while dragging */}
                     {isDragging && (
                       <rect x={x - 2} y={y - 2} width={w + 4} height={h + 4}
                         rx={rx + 2} fill="none" stroke="#93c5fd" strokeWidth="1.2" opacity="0.6" />
                     )}
-                    {/* Selection ring */}
                     {(isSelected || isDragging) && (
                       <rect x={x - 1} y={y - 1} width={w + 2} height={h + 2}
                         rx={rx + 1} fill="none"
-                        stroke={isDragging ? '#3b82f6' : '#f59e0b'}
-                        strokeWidth="0.8" />
+                        stroke={isDragging ? '#3b82f6' : '#f59e0b'} strokeWidth="0.8" />
                     )}
                     <rect x={x} y={y} width={w} height={h} rx={rx} ry={rx}
-                      fill={fillColor}
-                      stroke={strokeColor}
+                      fill={fillColor} stroke={strokeColor}
                       strokeWidth={isDragging || isSelected || isOver ? 0.6 : 0.4}
                       strokeDasharray={isDragging ? 'none' : '1.5,0.8'}
                       style={{ transition: isDragging ? 'none' : 'fill 0.15s, stroke 0.15s' }}
@@ -499,7 +487,8 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
                       {table.number}
                     </text>
                     <text x={x + w / 2} y={y + h * 0.72}
-                      textAnchor="middle" fontSize="1.8" fill={isDragging ? '#3b82f6' : '#9ca3af'} fontFamily="system-ui"
+                      textAnchor="middle" fontSize="1.8"
+                      fill={isDragging ? '#3b82f6' : '#9ca3af'} fontFamily="system-ui"
                       style={{ pointerEvents: 'none', userSelect: 'none' }}>
                       {isDragging ? 'moving…' : `cap ${table.capacity}`}
                     </text>
@@ -525,7 +514,6 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         </div>
       </div>
 
-      {/* Table settings panel */}
       {selectedTable && (
         <TableSettingsPanel
           table={selectedTable}
