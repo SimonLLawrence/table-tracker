@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Header } from './components/Header'
 import { CustomerList } from './components/CustomerList'
 import { FloorPlan } from './components/FloorPlan'
+import { FloorPlanEditor } from './components/FloorPlanEditor'
 import { BottomSheet } from './components/BottomSheet'
 import { SeatPartySheet } from './components/SeatPartySheet'
 import { GroupDetailSheet } from './components/GroupDetailSheet'
@@ -22,7 +23,9 @@ export default function App() {
   const [mobileTab, setMobileTab] = useState<MobileTab>('guests')
   const [moveDest, setMoveDest] = useState<Table | null>(null)
   const [walkInMode, setWalkInMode] = useState(false)
-  const { groups, moveMode } = useStore()
+  const [editMode, setEditMode] = useState(false)
+  const [draftTables, setDraftTables] = useState<Table[]>([])
+  const { groups, moveMode, floorPlan, saveFloorPlan, showToast } = useStore()
 
   // Clear moveDest when moveMode becomes inactive
   useEffect(() => {
@@ -34,8 +37,30 @@ export default function App() {
     if (sheet || moveMode.active) setWalkInMode(false)
   }, [sheet, moveMode.active])
 
+  const enterEditMode = () => {
+    setDraftTables(floorPlan.tables.map(t => ({ ...t })))
+    setEditMode(true)
+    setWalkInMode(false)
+    setSheet(null)
+  }
+
+  const saveLayout = () => {
+    saveFloorPlan({ ...floorPlan, tables: draftTables })
+    setEditMode(false)
+    setDraftTables([])
+    showToast('Layout saved')
+  }
+
+  const cancelLayout = () => {
+    setEditMode(false)
+    setDraftTables([])
+  }
+
+  const handleDraftTablesChange = useCallback((tables: Table[]) => {
+    setDraftTables(tables)
+  }, [])
+
   const handleTableClick = (table: Table) => {
-    // Walk-in mode: only allow picking a free table
     if (walkInMode) {
       if (table.status === 'free') {
         setWalkInMode(false)
@@ -63,12 +88,36 @@ export default function App() {
 
   const handleAddWalkIn = () => {
     setWalkInMode(true)
-    setMobileTab('floor') // switch to floor on mobile
+    setMobileTab('floor')
+  }
+
+  const hasSeatedGroups = groups.some(g => g.status === 'seated')
+
+  if (editMode) {
+    return (
+      <div className="flex flex-col h-screen bg-gray-100 select-none">
+        <Header
+          editMode
+          onSaveLayout={saveLayout}
+          onCancelLayout={cancelLayout}
+        />
+        <div className="flex-1 overflow-hidden">
+          <FloorPlanEditor
+            tables={draftTables}
+            onTablesChange={handleDraftTablesChange}
+          />
+        </div>
+        <Toast />
+      </div>
+    )
   }
 
   return (
     <div className="flex flex-col h-screen bg-gray-100 select-none">
-      <Header />
+      <Header
+        hasSeatedGroups={hasSeatedGroups}
+        onEditLayout={enterEditMode}
+      />
 
       {/* Tablet layout */}
       <div className="hidden md:flex flex-1 overflow-hidden">

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { v4 as uuidv4 } from 'uuid'
-import type { AppState, Group } from './types'
+import type { AppState, FloorPlan, Group } from './types'
 import { DEFAULT_FLOOR_PLAN } from './defaultFloorPlan'
 
 interface Store extends AppState {
@@ -10,6 +10,7 @@ interface Store extends AppState {
   markAsLeft: (groupId: string) => void
   moveGroup: (groupId: string, newTableId: string) => void
   updateNote: (groupId: string, note: string) => void
+  saveFloorPlan: (plan: FloorPlan) => void
   // UI state
   moveMode: { active: boolean; groupId: string | null }
   startMoveMode: (groupId: string) => void
@@ -91,6 +92,10 @@ export const useStore = create<Store>()(
           },
           moveMode: { active: false, groupId: null },
         }))
+      },
+
+      saveFloorPlan: (plan) => {
+        set({ floorPlan: plan })
       },
 
       updateNote: (groupId, note) => {

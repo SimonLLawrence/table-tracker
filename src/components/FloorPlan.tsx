@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
 import { useStore } from '../store'
 import type { Table } from '../types'
-import { isAlert, truncate } from '../utils'
+import { isAlert, truncate, computeSectionDividers } from '../utils'
 
 interface Props {
   onSelectTable: (table: Table) => void
@@ -188,7 +188,7 @@ export function FloorPlan({ onSelectTable, walkInMode = false, onCancelWalkIn }:
     return { bg: '#dcfce7', border: '#22c55e', text: '#166534' }
   }
 
-  const sections = [...new Set(floorPlan.tables.map(t => t.section).filter(Boolean))]
+  const sectionDividers = computeSectionDividers(floorPlan.tables)
 
   return (
     <div className="relative flex flex-col h-full bg-gray-50">
@@ -274,14 +274,14 @@ export function FloorPlan({ onSelectTable, walkInMode = false, onCancelWalkIn }:
               className="w-full h-full"
               style={{ touchAction: 'none' }}
             >
-              {sections.includes('Bar') && (
-                <>
-                  <line x1="5" y1="68" x2="95" y2="68" stroke="#d1d5db" strokeWidth="0.3" strokeDasharray="1,1" />
-                  <text x="50" y="71" textAnchor="middle" fontSize="2.5" fill="#9ca3af" fontWeight="600" fontFamily="system-ui">
-                    ─── BAR AREA ───
+              {sectionDividers.map(d => (
+                <g key={d.label}>
+                  <line x1="5" y1={d.y} x2="95" y2={d.y} stroke="#d1d5db" strokeWidth="0.3" strokeDasharray="1,1" />
+                  <text x="50" y={d.y + 3} textAnchor="middle" fontSize="2.5" fill="#9ca3af" fontWeight="600" fontFamily="system-ui">
+                    ─── {d.label.toUpperCase()} ───
                   </text>
-                </>
-              )}
+                </g>
+              ))}
               {floorPlan.tables.map(table => {
                 const { bg, border, text } = getTableColor(table)
                 const group = getGroup(table.currentGroupId)

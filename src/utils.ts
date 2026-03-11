@@ -1,3 +1,26 @@
+import type { Table } from './types'
+
+export function computeSectionDividers(tables: Table[]): { y: number; label: string }[] {
+  const sectionBounds = new Map<string, { minY: number; maxY: number }>()
+  for (const t of tables) {
+    if (!t.section) continue
+    const b = sectionBounds.get(t.section)
+    const top = t.position.y
+    const bottom = t.position.y + t.size.h
+    if (!b) sectionBounds.set(t.section, { minY: top, maxY: bottom })
+    else { b.minY = Math.min(b.minY, top); b.maxY = Math.max(b.maxY, bottom) }
+  }
+  const sorted = [...sectionBounds.entries()].sort(
+    (a, b) => (a[1].minY + a[1].maxY) / 2 - (b[1].minY + b[1].maxY) / 2
+  )
+  const dividers: { y: number; label: string }[] = []
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const divY = (sorted[i][1].maxY + sorted[i + 1][1].minY) / 2
+    dividers.push({ y: divY, label: sorted[i + 1][0] })
+  }
+  return dividers
+}
+
 export function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
