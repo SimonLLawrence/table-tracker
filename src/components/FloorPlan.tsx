@@ -151,7 +151,7 @@ export function FloorPlan({ onSelectTable }: Props) {
   const onMouseUp = () => { dragStart.current = null }
 
   // ── Table interaction (only fire if not dragging) ─────────────────────────
-  const handleTableClick = (e: React.MouseEvent | React.TouchEvent, table: Table) => {
+  const handleTableClick = (_e: React.MouseEvent | React.TouchEvent, table: Table) => {
     if (didDrag.current) return
     if (moveMode.active) {
       if (table.status === 'free') onSelectTable(table)
@@ -272,7 +272,7 @@ export function FloorPlan({ onSelectTable }: Props) {
                 return (
                   <g
                     key={table.id}
-                    onClick={(e) => handleTableClick(e, table)}
+                    onClick={(e) => handleTableClick(e as React.MouseEvent, table)}
                     style={{
                       cursor: moveMode.active && table.status !== 'free' && !isSource
                         ? 'default'
