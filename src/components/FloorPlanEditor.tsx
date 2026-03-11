@@ -74,6 +74,7 @@ function commonSection(tables: Table[]): string {
 export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props) {
   const [localTables, setLocalTables] = useState<Table[]>(initialTables)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
   const [transform, setTransform] = useState<Transform>(INITIAL)
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -205,6 +206,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
           // Drag ended — commit
           onTablesChange(tablesRef.current)
         }
+        setDraggingId(null)
       }
 
       pointerRef.current = null
@@ -241,6 +243,7 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
         tableH: table.size.h,
         moved: false,
       }
+      setDraggingId(table.id)
     } else {
       // Tap on empty canvas — deselect and start pan
       setSelectedId(null)
@@ -353,7 +356,6 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
   const sectionCounts: Record<string, number> = {}
   for (const t of localTables) if (t.section) sectionCounts[t.section] = (sectionCounts[t.section] ?? 0) + 1
   const selectedTable = selectedId ? localTables.find(t => t.id === selectedId) : undefined
-  const isDraggingId = pointerRef.current?.kind === 'table' ? pointerRef.current.tableId : undefined
 
   return (
     <div className="relative flex flex-col h-full bg-gray-50">
@@ -436,42 +438,78 @@ export function FloorPlanEditor({ tables: initialTables, onTablesChange }: Props
               {/* Tables */}
               {localTables.map(table => {
                 const isSelected = table.id === selectedId
+                const isDragging = table.id === draggingId
                 const isOver = overlapping.has(table.id)
                 const { x, y } = table.position
                 const { w, h } = table.size
                 const rx = table.shape === 'round' ? Math.min(w, h) / 2 : 2
 
+                // Colour scheme:
+                // dragging → blue (being moved)
+                // selected → amber (settings open)
+                // overlap  → red/yellow warning
+                // default  → grey
+                const fillColor = isDragging
+                  ? '#dbeafe'
+                  : isOver
+                    ? '#fef9c3'
+                    : isSelected
+                      ? '#fef3c7'
+                      : '#f3f4f6'
+                const strokeColor = isDragging
+                  ? '#3b82f6'
+                  : isOver
+                    ? '#ef4444'
+                    : isSelected
+                      ? '#f59e0b'
+                      : '#9ca3af'
+                const textColor = isDragging
+                  ? '#1d4ed8'
+                  : isOver
+                    ? '#b45309'
+                    : isSelected
+                      ? '#92400e'
+                      : '#374151'
+
                 return (
-                  <g key={table.id} style={{ cursor: table.id === isDraggingId ? 'grabbing' : 'grab' }}>
-                    {isSelected && (
-                      <rect x={x - 1.5} y={y - 1.5} width={w + 3} height={h + 3}
-                        rx={rx + 1.5} fill="none" stroke="#f59e0b" strokeWidth="0.8" />
+                  <g key={table.id} style={{ cursor: isDragging ? 'grabbing' : 'grab' }}>
+                    {/* Glow ring while dragging */}
+                    {isDragging && (
+                      <rect x={x - 2} y={y - 2} width={w + 4} height={h + 4}
+                        rx={rx + 2} fill="none" stroke="#93c5fd" strokeWidth="1.2" opacity="0.6" />
+                    )}
+                    {/* Selection ring */}
+                    {(isSelected || isDragging) && (
+                      <rect x={x - 1} y={y - 1} width={w + 2} height={h + 2}
+                        rx={rx + 1} fill="none"
+                        stroke={isDragging ? '#3b82f6' : '#f59e0b'}
+                        strokeWidth="0.8" />
                     )}
                     <rect x={x} y={y} width={w} height={h} rx={rx} ry={rx}
-                      fill={isOver ? '#fef9c3' : '#f3f4f6'}
-                      stroke={isOver ? '#ef4444' : isSelected ? '#f59e0b' : '#9ca3af'}
-                      strokeWidth={isSelected || isOver ? 0.6 : 0.4}
-                      strokeDasharray="1.5,0.8"
-                      style={{ transition: 'fill 0.15s, stroke 0.15s' }}
+                      fill={fillColor}
+                      stroke={strokeColor}
+                      strokeWidth={isDragging || isSelected || isOver ? 0.6 : 0.4}
+                      strokeDasharray={isDragging ? 'none' : '1.5,0.8'}
+                      style={{ transition: isDragging ? 'none' : 'fill 0.15s, stroke 0.15s' }}
                     />
                     <text x={x + w / 2} y={y + h * 0.4}
                       textAnchor="middle" fontSize="2.8" fontWeight="700"
-                      fill={isOver ? '#b45309' : '#374151'} fontFamily="system-ui"
+                      fill={textColor} fontFamily="system-ui"
                       style={{ pointerEvents: 'none', userSelect: 'none' }}>
                       {table.number}
                     </text>
                     <text x={x + w / 2} y={y + h * 0.72}
-                      textAnchor="middle" fontSize="1.8" fill="#9ca3af" fontFamily="system-ui"
+                      textAnchor="middle" fontSize="1.8" fill={isDragging ? '#3b82f6' : '#9ca3af'} fontFamily="system-ui"
                       style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                      cap {table.capacity}
+                      {isDragging ? 'moving…' : `cap ${table.capacity}`}
                     </text>
                     <text x={x + w - 1} y={y + 3.5}
                       textAnchor="end" fontSize="2.2"
-                      fill={isSelected ? '#f59e0b' : '#c4c4c4'} fontFamily="system-ui"
+                      fill={isDragging ? '#3b82f6' : isSelected ? '#f59e0b' : '#c4c4c4'} fontFamily="system-ui"
                       style={{ pointerEvents: 'none', userSelect: 'none' }}>
                       ⠿
                     </text>
-                    {isOver && (
+                    {isOver && !isDragging && (
                       <text x={x + w / 2} y={y + h * 0.95}
                         textAnchor="middle" fontSize="1.6" fill="#ef4444"
                         fontFamily="system-ui" fontWeight="600"
